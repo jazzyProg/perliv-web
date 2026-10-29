@@ -22,10 +22,16 @@ const withToken = url => { const t = auth.get(); return API + url + (t ? (url.in
 async function api(path, opts = {}) {
   const t = auth.get(), headers = opts.body ? { 'Content-Type': 'application/json' } : {};
   if (t) headers.Authorization = 'Bearer ' + t;
-  const r = await fetch(API + path, {
-    method: opts.method || 'GET', headers, credentials: 'omit',
-    body: opts.body ? JSON.stringify(opts.body) : undefined,
-  });
+  let r;
+  try {
+    r = await fetch(API + path, {
+      method: opts.method || 'GET', headers, credentials: 'omit',
+      body: opts.body ? JSON.stringify(opts.body) : undefined,
+    });
+  } catch (e) {
+    // network or CORS: the browser hides which one
+    throw new Error(API ? 'Сервер ' + API + ' недоступен или не пускает этот сайт (PERLIV_ORIGINS)' : 'Сервер недоступен');
+  }
   if (r.status === 401 && path !== '/api/login') { auth.clear(); store.login = true; }
   if (!r.ok) {
     let msg = r.statusText;
@@ -94,7 +100,7 @@ const alpha = (hex, a) => {   // '#rrggbb' → rgba() for chart fills
 };
 
 // ver grows every time a run finishes: the open page is re-mounted and shows the new data without F5.
-const store = reactive({ st: null, toast: null, route: { name: 'dash', arg: null }, ver: 0, theme: getTheme(), menu: false, login: false });
+const store = reactive({ st: null, toast: null, route: { name: 'dash', arg: null }, ver: 0, theme: getTheme(), menu: false, login: !!API && !auth.get() });
 function toast(msg, err = false) {
   store.toast = { msg, err };
   clearTimeout(toast._t);
