@@ -346,3 +346,21 @@ pre.log { background: var(--bg2); border: 1px solid var(--line); border-radius: 
   .cards { grid-template-columns: minmax(0, 1fr); }
   .feed { grid-template-columns: repeat(2, minmax(0, 1fr)); }
 }
+
+/* account card over the page: the list under it keeps its filters and scroll */
+html.modal-open, html.modal-open body { overflow: hidden; }
+.modal-wrap { position: fixed; inset: 0; z-index: 50; background: var(--overlay); display: flex; justify-content: center;
+              align-items: flex-start; padding: 32px 24px; overflow: hidden; animation: modal-fade .15s var(--ease); }
+.modal { background: var(--bg); border: 1px solid var(--line); border-radius: var(--radius); box-shadow: var(--shadow-lg);
+         width: min(1240px, 100%); max-height: calc(100vh - 64px); max-height: calc(100dvh - 64px); overflow: auto;
+         overscroll-behavior: contain; outline: none; animation: modal-in .18s var(--ease); }
+.modal-bar { position: sticky; top: 0; z-index: 2; display: flex; align-items: center; gap: 8px; padding: 10px 14px;
+             background: var(--card); border-bottom: 1px solid var(--line); }
+.modal-body { padding: 18px 20px 24px; }
+@keyframes modal-fade { from { opacity: 0; } }
+@keyframes modal-in { from { opacity: 0; transform: translateY(8px); } }
+@media (max-width: 640px) {
+  .modal-wrap { padding: 0; }
+  .modal { border-radius: 0; border: 0; max-height: 100vh; max-height: 100dvh; height: 100%; }
+  .modal-body { padding: 14px 16px 24px; }
+}

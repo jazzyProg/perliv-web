@@ -33,6 +33,7 @@ async function api(path, opts = {}) {
     throw new Error(API ? 'Сервер ' + API + ' недоступен или не пускает этот сайт (PERLIV_ORIGINS)' : 'Сервер недоступен');
   }
   if (r.status === 401 && path !== '/api/login') { auth.clear(); store.login = true; }
+  if (opts.method && opts.method !== 'GET' && store.cards.length && r.ok) store.cardDirty = true;
   if (!r.ok) {
     let msg = r.statusText;
     try { const d = (await r.json()).detail; msg = typeof d === 'string' ? d : d ? 'Неверный запрос (' + r.status + ')' : msg; } catch (e) {}
@@ -100,7 +101,8 @@ const alpha = (hex, a) => {   // '#rrggbb' → rgba() for chart fills
 };
 
 // ver grows every time a run finishes: the open page is re-mounted and shows the new data without F5.
-const store = reactive({ st: null, toast: null, route: { name: 'dash', arg: null }, ver: 0, theme: getTheme(), menu: false, login: !!API && !auth.get() });
+const store = reactive({ st: null, toast: null, route: { name: 'dash', arg: null }, ver: 0, theme: getTheme(), menu: false, login: !!API && !auth.get(),
+  cards: [], cardDirty: false });
 function toast(msg, err = false) {
   store.toast = { msg, err };
   clearTimeout(toast._t);
@@ -114,8 +116,30 @@ async function refreshState() {
     if (was && !store.st.pipeline.running) { store.ver++; toast('Анализ завершён — данные обновлены'); }
   } catch (e) {}
 }
+// Account cards open over the current page (list, filters and scroll stay); a link inside a card stacks the next one.
+// The open card is one browser-history step: "Back" (phone gesture too) closes it instead of leaving the page.
+function openCard(u) {
+  if (!u) return;
+  u = String(u).replace(/^@/, '').toLowerCase();
+  if (!store.cards.length) { try { history.pushState({ perlivCard: 1 }, ''); } catch (e) {} }
+  if (store.cards[store.cards.length - 1] !== u) store.cards.push(u);
+}
+function closeCardsNow() {
+  store.cards.splice(0);
+  if (store.cardDirty) { store.cardDirty = false; window.dispatchEvent(new Event('perliv-refresh')); }
+}
+function closeCards() {
+  if (history.state && history.state.perlivCard) history.back();   // popstate below closes it
+  else closeCardsNow();
+}
+window.addEventListener('popstate', () => { if (store.cards.length) closeCardsNow(); });
+function useRefresh(load) {
+  const h = () => load();
+  onMounted(() => window.addEventListener('perliv-refresh', h));
+  onUnmounted(() => window.removeEventListener('perliv-refresh', h));
+}
 async function runNow() {
-  try { await api('/api/run', { method: 'POST' }); toast('Анализ запущен'); refreshState(); }
+  try { const r = await api('/api/run', { method: 'POST' }); toast(r.queued ? 'ИИ доделывает пачку — анализ начнётся сразу после' : 'Анализ запущен'); refreshState(); }
   catch (e) { toast(e.message, true); }
 }
 async function runBulk() {
@@ -139,7 +163,7 @@ async function runApify() {
   try { await api('/api/run?kind=apify', { method: 'POST' }); toast('Быстрый проход запущен'); refreshState(); }
   catch (e) { toast(e.message, true); }
 }
-const H = { fmt, signed, ago, dt, day, host, igUrl, postUrl, ROLE, KIND, REGION, store, runBulk, runApify };
+const H = { fmt, signed, ago, dt, day, host, igUrl, postUrl, ROLE, KIND, REGION, store, runBulk, runApify, openCard };
 
 // ---------- shared components ----------
 const Av = {
@@ -291,6 +315,7 @@ const Home = {
       try { await api('/api/run?kind=discover', { method: 'POST' }); toast('Ищу новые проекты вне фокуса'); refreshState(); } catch (e) { toast(e.message, true); }
     }
     onMounted(load);
+    useRefresh(load);
     watch(() => store.st?.pipeline.running, (v, old) => { if (old && !v) load(); });
     return { SIZES, board, q, size, showTracked, groups, total, cur, G, load, track, discover, runNow, st: computed(() => store.st), ...H };
   },
@@ -314,7 +339,8 @@ const Dashboard = {
       <div v-else class="row"><Icon name="calendar" class="dim"/>
         <span>Следующий авто-анализ: <b>{{ dt(st.schedule.next) }}</b> <span class="muted">({{ st.schedule.reason }})</span></span></div>
       <div class="status-line" style="margin-top:12px">
-        <span>Instagram-сессия: <b :style="{color: st.pipeline.session.ok ? 'var(--good)' : st.pipeline.session.ok === false ? 'var(--bad)' : 'var(--muted)'}">{{ st.pipeline.session.message }}</b></span>
+        <span>Instagram-сессия: <b :style="{color: st.pipeline.session.ok ? 'var(--good)' : st.pipeline.session.ok === false ? 'var(--bad)' : 'var(--muted)'}">{{ st.pipeline.session.message }}</b>
+          <span v-if="st.pipeline.session.ok === false" class="muted"> · анализ идёт без логина, 18+ ждут сессию: {{ (st.waiting_session?.candidates || 0) + (st.waiting_session?.focus || 0) }}</span></span>
         <span>ИИ: <b>{{ st.llm.provider === 'ollama' ? 'Ollama' : 'Gemini' }}</b></span>
         <span>Gemini сегодня: <b>{{ st.gemini.requests }}</b> / {{ st.gemini.cap }} запросов</span>
         <span v-if="st.llm.ollama.requests">Ollama сегодня: <b>{{ st.llm.ollama.requests }}</b> пачек</span>
@@ -371,8 +397,9 @@ const Dashboard = {
     const d = ref(null);
     const load = async () => d.value = await api('/api/dashboard');
     onMounted(load);
+    useRefresh(load);
     watch(() => store.st?.pipeline.running, (v, old) => { if (old && !v) load(); });
-    return { d, st: computed(() => store.st), runNow, go: u => location.hash = '#/a/' + u, ...H };
+    return { d, st: computed(() => store.st), runNow, go: openCard, ...H };
   },
 };
 
@@ -457,7 +484,8 @@ const Focus = {
     async function setRole(u, role) { await api('/api/accounts/' + u, { method: 'PATCH', body: { role } }); toast('@' + u + ' убран из списка'); load(); }
     async function act(s, a) { await api(`/api/suggestions/${s.username}/${s.target}/${a}`, { method: 'POST' }); load(); }
     onMounted(load);
-    return { data, tab, addText, addRole, add, setRole, act, groups, load, go: u => location.hash = '#/a/' + u, ...H };
+    useRefresh(load);
+    return { data, tab, addText, addRole, add, setRole, act, groups, load, go: openCard, ...H };
   },
 };
 
@@ -481,11 +509,12 @@ const Teardown = {
 const Viral = {
   template: `
   <div>
-    <div class="head"><h1>Залетевшее</h1><span class="sub">посты фокус-пабликов, набравшие в {{ d?.ratio }}+ раз больше обычного для своего паблика · {{ d?.days }} дней</span><span class="sp"></span>
+    <div class="head"><h1>Залетевшее</h1><span class="sub">посты проектов (отслеживаемых и рекламируемых в фокусе), набравшие в {{ d?.ratio }}+ раз больше обычного для своего аккаунта · {{ d?.days }} дней</span><span class="sp"></span>
       <button class="btn" :disabled="st?.pipeline.running" @click="contentRun"><Icon name="microscope"/>Собрать просмотры и разборы</button>
       <button class="btn primary" :disabled="!shown.length || dls?.running" @click="download"><Icon name="download"/>Скачать отобранное ({{ Math.min(shown.length, 500) }})</button></div>
     <Skel v-if="!d" :blocks="4" :rows="6"/>
-    <div class="help" style="margin:-8px 0 12px" v-if="d">Каждый паблик сравнивается только сам с собой: с медианой своих постов по просмотрам reels или лайкам + комментариям. Поэтому маленький и огромный паблик оцениваются честно.
+    <div class="help" style="margin:-8px 0 12px" v-if="d">Только контент проектов: {{ d.owners }} проектов (отслеживаемые + рекламировавшиеся в фокус-пабликах), посты собраны у {{ d.with_posts }}. Посты самих пабликов здесь не показываются.
+      Каждый проект сравнивается только сам с собой: с медианой своих постов по просмотрам reels или лайкам + комментариям. Поэтому маленький и огромный аккаунт оцениваются честно.
       Просмотры reels собраны у {{ d.with_views }} постов. Если их мало, нажми «Собрать просмотры и разборы». Формат и тему ИИ определяет по подписи и типу поста, само видео он не смотрит.
       <span v-if="dls && dls.username==='viral' && dls.message"> · {{ dls.message }} <a href="" @click.prevent="openFolder">открыть папку</a></span></div>
 
@@ -494,7 +523,7 @@ const Viral = {
         <span v-if="!d.summary.formats.length" class="dim small">ИИ ещё не разметил ({{ d.summary.tagged }}/{{ d.summary.total }})</span></div></div>
       <div class="card"><h3>Темы</h3><div class="row" style="gap:5px"><a v-for="x in d.summary.topics" href="" @click.prevent="toggle('topic', x.name)" :class="['chip', f.topic===x.name ? 'p' : '']">{{ x.name }} · {{ x.n }}</a></div></div>
       <div class="card"><h3>Тип поста</h3><div class="row" style="gap:5px"><a v-for="x in d.summary.types" href="" @click.prevent="toggle('type', x.name)" :class="['chip', f.type===x.name ? 'p' : '']">{{ x.name }} · {{ x.n }} <span class="dim">×{{ x.avg }}</span></a></div></div>
-      <div class="card"><h3>Чаще всего залетает у</h3><div class="row" style="gap:5px"><a v-for="x in d.summary.owners.slice(0, 12)" href="" @click.prevent="toggle('owner', x.name)" :class="['chip', f.owner===x.name ? 'p' : 'c']">@{{ x.name }} · {{ x.n }}</a></div></div>
+      <div class="card"><h3>Чаще всего залетает у проекта</h3><div class="row" style="gap:5px"><a v-for="x in d.summary.owners.slice(0, 12)" href="" @click.prevent="toggle('owner', x.name)" :class="['chip', f.owner===x.name ? 'p' : 'c']">@{{ x.name }} · {{ x.n }}</a></div></div>
     </div>
     <div class="row" style="margin-bottom:10px;gap:8px" v-if="Object.values(f).some(Boolean)"><span class="small muted">Фильтр:</span>
       <button v-for="(v, k) in f" v-show="v" :key="k" class="chip p" style="cursor:pointer;border:0" @click="f[k] = null" :aria-label="'Убрать фильтр ' + v">{{ v }}<Icon name="x" size="sm"/></button></div>
@@ -506,7 +535,7 @@ const Viral = {
           <div v-else class="ph">{{ (p.caption || '').slice(0, 90) }}</div>
           <span class="chip g n-media" :title="'В ' + p.ratio + ' раз выше обычного для паблика'">×{{ p.ratio }}</span>
           <span class="chip n-media">{{ p.type }}</span>
-          <div class="cap"><b>@{{ p.owner }}</b> · {{ day(p.taken_at) }}
+          <div class="cap"><b>@{{ p.owner }}</b><span v-if="p.tracked" title="Отслеживаемый проект"> ★</span> · {{ day(p.taken_at) }}
             <div class="row" style="gap:8px;margin-top:2px"><span v-if="p.views" class="row" style="gap:3px"><Icon name="play" size="sm"/>{{ fmt(p.views) }}</span>
               <span v-if="p.likes != null" class="row" style="gap:3px"><Icon name="heart" size="sm"/>{{ fmt(p.likes) }}</span>
               <span class="row" style="gap:3px"><Icon name="message-circle" size="sm"/>{{ fmt(p.comments) }}</span></div></div></a>
@@ -515,7 +544,8 @@ const Viral = {
             <span class="chip w" v-if="p.advertises.length" :title="'В посте отмечен: ' + p.advertises.join(', ')"><Icon name="megaphone" size="sm"/>@{{ p.advertises[0] }}</span></div>
           <div v-if="p.hook"><span class="dim">Зацепка:</span> {{ p.hook }}</div>
           <div v-if="p.why" class="muted">{{ p.why }}</div>
-          <div class="dim">по метрике «{{ p.by }}»: обычно {{ fmt(p.median) }}</div></div>
+          <div class="dim">по метрике «{{ p.by }}»: обычно {{ fmt(p.median) }}</div>
+          <a :href="'#/a/' + p.owner" class="small row" style="gap:4px">карточка @{{ p.owner }}<Icon name="arrow-right" size="sm"/></a></div>
       </div>
     </div>
     <div v-if="d && !shown.length" class="card"><Empty icon="flame" text="Под этот фильтр залетевших постов нет — сними фильтр выше или собери просмотры"/></div>
@@ -536,6 +566,7 @@ const Viral = {
     }
     const openFolder = () => api('/api/open-folder', { method: 'POST' });
     onMounted(load);
+    useRefresh(load);
     return { d, f, limit, shown, toggle, download, contentRun, openFolder, st: computed(() => store.st), dls: computed(() => store.st?.download), ...H };
   },
 };
@@ -634,6 +665,7 @@ const Finds = {
       catch (e) { toast(e.message, true); }
     }
     onMounted(load);
+    useRefresh(load);
     return { d, tab, open, nicheSel, nicheGroups, load, track, contentRun, CATEGORY, st: computed(() => store.st), ...H };
   },
 };
@@ -665,7 +697,9 @@ const Projects = {
   </div>`,
   setup() {
     const list = ref([]), q = ref(''), niche = ref(''), sort = ref('ads'), loaded = ref(false);
-    onMounted(async () => { list.value = await api('/api/projects'); loaded.value = true; });
+    const load = async () => { list.value = await api('/api/projects'); loaded.value = true; };
+    onMounted(load);
+    useRefresh(load);
     const niches = computed(() => [...new Set(list.value.map(p => p.niche).filter(Boolean))].sort());
     const shown = computed(() => {
       let l = list.value.filter(p => (!niche.value || p.niche === niche.value) &&
@@ -673,7 +707,7 @@ const Projects = {
       const key = { ads: p => p.ads, followers: p => p.followers || 0, growth: p => p.growth_7d ?? -1e12, last: p => p.last_ad || 0 }[sort.value];
       return l.sort((a, b) => key(b) - key(a));
     });
-    return { list, q, niche, sort, niches, shown, loaded, go: u => location.hash = '#/a/' + u, ...H };
+    return { list, q, niche, sort, niches, shown, loaded, go: openCard, ...H };
   },
 };
 
@@ -849,6 +883,7 @@ const Account = {
       toast('Сохранено'); load();
     }
     onMounted(load);
+    useRefresh(load);
     onUnmounted(() => chart?.destroy());
     watch(() => props.arg, load);
     return { d, a, err, cv, feedCard, tab, selDay, limit, range, shown, dayLong, dlScope, download, openFolder, setRole, load,
@@ -931,6 +966,7 @@ const Candidates = {
       toast('@' + c.username + (r === 'rejected' ? ' отклонён' : r === 'project' ? ' добавлен в проекты' : ' добавлен в фокус'));
     }
     onMounted(load);
+    useRefresh(load);
     return { rows, kind, q, sort, src, qs, s, load, role, st: computed(() => store.st), ...H };
   },
 };
@@ -1010,6 +1046,7 @@ const Niches = {
       catch (e) { toast(e.message, true); }
     }
     onMounted(load);
+    useRefresh(load);
     return { board, groups, nf, q, size, showOther, open, limit, isOpen, load, addNiche, ...H };
   },
 };
@@ -1113,7 +1150,7 @@ const Graph = {
       });
       const byId = Object.fromEntries(data.nodes.map(n => [n.username, n]));
       cy.on('tap', 'node', e => sel.value = byId[e.target.id()]);
-      cy.on('dbltap', 'node', e => location.hash = '#/a/' + e.target.id());
+      cy.on('dbltap', 'node', e => openCard(e.target.id()));
       cy.on('tap', e => { if (e.target === cy) sel.value = null; });
       cy.on('mouseover', 'node', e => { cy.elements().style('opacity', .12); e.target.closedNeighborhood().style('opacity', 1); });
       cy.on('mouseout', 'node', () => cy.elements().removeStyle('opacity'));
@@ -1183,6 +1220,7 @@ const Dynamics = {
     watch(filter, () => { sel.value = shown.value.slice(0, 5).map(r => r.username); draw(); });
     watch(() => store.st?.pipeline.running, (v, old) => { if (old && !v) load(); });
     onMounted(load);
+    useRefresh(load);
     onUnmounted(() => chart?.destroy());
     return { rows, filter, sel, cv, shown, toggle, snap, dl, dpct, cls, st: computed(() => store.st), ...H };
   },
@@ -1298,6 +1336,7 @@ const Signals = {
     async function save(s) { await api('/api/signals/' + s.id, { method: 'PUT', body: { ...s, enabled: !!s.enabled } }); }
     async function del(s) { await api('/api/signals/' + s.id, { method: 'DELETE' }); load(); }
     onMounted(load);
+    useRefresh(load);
     return { rows, f, kinds, ph, add, save, del, L, pin, pinnable, featTitle };
   },
 };
@@ -1360,6 +1399,7 @@ const Votes = {
     async function restore(h) { await api(`/api/suggestions/${h.username}/focus/restore`, { method: 'POST' }); toast('Вернул в предложения'); load(); }
     async function toFocus(h) { await api(`/api/suggestions/${h.username}/focus/accept`, { method: 'POST' }); toast('@' + h.username + ' в фокусе'); load(); }
     onMounted(load);
+    useRefresh(load);
     return { data, tab, fl, fr, q, shown, load, clear, restore, toFocus, dtFull, ...H };
   },
 };
@@ -1383,7 +1423,7 @@ const Runs = {
   </div>`,
   setup() {
     const rows = ref([]), sel = ref(null);
-    const trig = { manual: 'вручную', startup: 'при запуске', auto: 'по расписанию', snapshot: 'снимок подписчиков', bulk: 'большой разбор', recheck: 'перепроверка', content: 'контент и разборы', apify: 'быстрый проход (Apify)', classify: 'проверка ИИ', discover: 'поиск новых проектов' };
+    const trig = { manual: 'вручную', startup: 'при запуске', auto: 'по расписанию', snapshot: 'снимок подписчиков', bulk: 'большой разбор', recheck: 'перепроверка', content: 'контент и разборы', apify: 'быстрый проход (Apify)', classify: 'проверка ИИ', discover: 'поиск новых проектов', ai: 'ИИ между прогонами' };
     const st_ = { ok: 'готово', partial: 'частично', error: 'ошибка', interrupted: 'прерван' };
     const load = async () => { rows.value = await api('/api/runs'); if (!sel.value && rows.value[0]) open(rows.value[0].id); };
     const open = async id => sel.value = await api('/api/runs/' + id);
@@ -1437,7 +1477,7 @@ const Settings = {
       auto_runs_per_day: 'Авто-прогонов в день', auto_interval_hours: 'Интервал между прогонами, ч',
       focus_scrolls_first: 'Первый скан паблика: прокруток (×12 постов)', focus_scrolls_next: 'Повторный скан: прокруток',
       tagged_limit_first: 'Упоминаний проекта: первый проход', tagged_limit_next: 'Упоминаний проекта: повторно',
-      discover_new: 'Искать проекты вне фокуса в авто-прогонах (1/0). 0 = только фокус, поиск снаружи кнопкой', focus_first: 'Сначала фокус (1/0): пока ждут кандидаты из фокуса, не искать снаружи', focus_per_run: 'Фокус-пабликов за прогон (по кругу)', enrich_per_run: 'Проверять кандидатов за прогон',
+      ai_interval_minutes: 'ИИ между прогонами: заход каждые, мин (0 = только в прогонах)', ai_batch_accounts: 'ИИ между прогонами: аккаунтов за заход', focus_first: 'Сначала фокус (1/0): пока ждут кандидаты из фокуса, не искать снаружи', focus_per_run: 'Фокус-пабликов за прогон (по кругу)', enrich_per_run: 'Проверять кандидатов за прогон',
       max_pages_per_run: 'Жёсткий лимит страниц Instagram за прогон', delay_min: 'Пауза между страницами от, с', delay_max: 'Пауза до, с',
       tagged_source: 'Источник упоминаний', apify_daily_cap_usd: 'Apify: лимит в день, $',
       apify_bulk_usd: 'Apify: бюджет быстрого прохода, $', apify_enrich_max: 'Apify: профилей кандидатов за быстрый проход',
@@ -1456,8 +1496,9 @@ const Settings = {
       min_followers: 'Проекты от N подписчиков', region_filter: 'Регион проектов', allowed_langs: 'Языки био (через запятую, пусто — любые)',
     };
     const GROUPS = [
-      { title: 'Расписание', icon: 'calendar', keys: ['auto_runs_per_day', 'auto_interval_hours', 'snapshot_interval_hours'] },
-      { title: 'Сбор в Instagram', icon: 'radar', keys: ['discover_new', 'focus_per_run', 'focus_first', 'focus_scrolls_first', 'focus_scrolls_next', 'enrich_per_run',
+      { title: 'Расписание', icon: 'calendar', keys: ['auto_runs_per_day', 'auto_interval_hours', 'snapshot_interval_hours', 'ai_interval_minutes', 'ai_batch_accounts'],
+        help: 'Авто-прогон проверяет только фокус: что рекламируют фокус-паблики и кого. Поиск новых проектов вне фокуса — только кнопкой «Искать новые проекты». ИИ разбирает найденное между прогонами, без Instagram.' },
+      { title: 'Сбор в Instagram', icon: 'radar', keys: ['focus_per_run', 'focus_first', 'focus_scrolls_first', 'focus_scrolls_next', 'enrich_per_run',
           'max_pages_per_run', 'delay_min', 'delay_max', 'tagged_source', 'tagged_limit_first', 'tagged_limit_next', 'apify_daily_cap_usd',
           'apify_bulk_usd', 'apify_enrich_max',
           'explore_sources_per_run', 'keywords_per_run', 'search_scrolls', 'suggest_focus_min_ads', 'growth_window_hours'],
@@ -1514,6 +1555,49 @@ const Login = {
 };
 function logout() { auth.clear(); store.st = null; store.login = true; }
 
+// ---------- card over the page ----------
+const CardModal = {
+  components: { Account },
+  template: `
+  <div v-if="cur" class="modal-wrap" @mousedown.self="close" role="dialog" aria-modal="true" :aria-label="'Карточка @' + cur">
+    <div class="modal" ref="box" tabindex="-1">
+      <div class="modal-bar">
+        <button v-if="store.cards.length > 1" class="btn sm ghost" @click="back" :title="'Назад к @' + prev">
+          <Icon name="arrow-right" style="transform:rotate(180deg)"/>@{{ prev }}</button>
+        <b v-else class="small muted">Карточка</b>
+        <span class="sp"></span>
+        <button class="btn sm ghost" @click="full" title="Открыть отдельной страницей (своя ссылка)"><Icon name="external-link" size="sm"/>Страницей</button>
+        <button class="btn sm icon ghost" @click="close" aria-label="Закрыть карточку" title="Закрыть (Esc)"><Icon name="x"/></button>
+      </div>
+      <div class="modal-body"><Account :arg="cur" :key="cur + ':' + store.ver"/></div>
+    </div>
+  </div>`,
+  setup() {
+    const box = ref(null);
+    const cur = computed(() => store.cards[store.cards.length - 1] || null);
+    const prev = computed(() => store.cards[store.cards.length - 2] || null);
+    const back = () => store.cards.pop();
+    const full = () => { const u = cur.value; try { history.replaceState(null, ''); } catch (e) {} closeCardsNow(); location.hash = '#/a/' + encodeURIComponent(u); };
+    const onKey = e => { if (e.key === 'Escape' && cur.value) { e.preventDefault(); closeCards(); } };
+    watch(cur, (v, old) => {
+      document.documentElement.classList.toggle('modal-open', !!v);
+      if (v) nextTick(() => { if (box.value) { box.value.scrollTop = 0; if (!old) box.value.focus({ preventScroll: true }); } });
+    });
+    onMounted(() => document.addEventListener('keydown', onKey));
+    onUnmounted(() => document.removeEventListener('keydown', onKey));
+    return { box, cur, prev, back, full, close: closeCards, store };
+  },
+};
+// any plain click on an account link opens the card; ctrl/cmd/middle click still opens a new browser tab
+document.addEventListener('click', e => {
+  if (e.button !== 0 || e.metaKey || e.ctrlKey || e.shiftKey || e.altKey) return;
+  const a = e.target.closest && e.target.closest('a[href^="#/a/"]');
+  if (!a || a.target === '_blank') return;
+  e.preventDefault();
+  e.stopPropagation();   // a link inside a clickable row must not also trigger the row
+  openCard(decodeURIComponent(a.getAttribute('href').slice(4)));
+}, true);
+
 // ---------- shell ----------
 const PAGES = { home: Home, dash: Dashboard, finds: Finds, viral: Viral, focus: Focus, projects: Projects, a: Account, candidates: Candidates, dynamics: Dynamics, niches: Niches,
   explore: Explore, graph: Graph, signals: Signals, votes: Votes, runs: Runs, settings: Settings };
@@ -1526,12 +1610,13 @@ const NAV = [
 ];
 
 function parseRoute() {
+  if (store.cards.length) closeCardsNow();
   const [name, arg] = location.hash.replace(/^#\/?/, '').split('/');
   store.route = { name: PAGES[name] ? name : 'home', arg: arg ? decodeURIComponent(arg) : null };
 }
 
 const app = createApp({
-  components: { Login },
+  components: { Login, CardModal },
   template: `
   <Login v-if="store.login"/>
   <div v-else :class="['layout', {'menu-open': store.menu}]">
@@ -1561,6 +1646,7 @@ const app = createApp({
       </div>
     </aside>
     <main class="main"><component :is="page" :arg="route.arg" :key="route.name + (route.arg || '') + ':' + store.ver"/></main>
+    <CardModal/>
     <div v-if="store.toast" :class="['toast', {err: store.toast.err}]" role="status" aria-live="polite">
       <Icon :name="store.toast.err ? 'circle-alert' : 'circle-check'" :style="{color: store.toast.err ? 'var(--bad)' : 'var(--good)'}" style="margin-top:2px"/><span>{{ store.toast.msg }}</span></div>
   </div>`,
